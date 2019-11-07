@@ -118,6 +118,13 @@ configvar CSI_PROW_GINKGO_VERSION v1.7.0 "Ginkgo"
 # of CPUs, but typically this can be set to something higher in the job.
 configvar CSI_PROW_GINKO_PARALLEL "-p" "Ginko parallelism parameter(s)"
 
+# Custom binary of ginkgo can also run the E2E test in parallel.
+# However, number of parallel runs needs to be manually specified by ginkgo.parallel.total.
+# Default for normal ginkgo run is equivalent to specifying:
+#   runtime.NumCPU() if runtime.NumCPU() <= 4, otherwise it is runtime.NumCPU() - 1
+# So, let's choose 4 as a default value.
+configvar CSI_PROW_GINKO_CUSTOM_PARALLEL "-ginkgo.parallel.total 4" "Custom ginkgo binary's parallelism parameter(s)"
+
 # Enables building the code in the repository. On by default, can be
 # disabled in jobs which only use pre-built components.
 configvar CSI_PROW_BUILD_JOB true "building code in repo enabled"
@@ -268,12 +275,15 @@ sanity_enabled () {
     [ "${CSI_PROW_TESTS_SANITY}" = "sanity" ] && tests_enabled "sanity"
 }
 tests_need_kind () {
-    tests_enabled "parallel" "serial" "serial-alpha" "parallel-alpha" ||
+    tests_enabled "parallel" "serial" "serial-alpha" "parallel-alpha" "repo-custom-serial" "repo-custom-parallel" ||
         sanity_enabled
 }
 tests_need_non_alpha_cluster () {
     tests_enabled "parallel" "serial" ||
         sanity_enabled
+}
+tests_need_non_alpha_cluster_for_repo_driver () {
+    tests_enabled "repo-custom-serial" "repo-custom-parallel"
 }
 tests_need_alpha_cluster () {
     tests_enabled "parallel-alpha" "serial-alpha"
@@ -657,6 +667,34 @@ install_hostpath () {
     fi
 }
 
+install_repo_csi_driver () {
+    if [ -e "${CSI_PROW_WORK}/deploy" ]; then
+        return
+    fi
+
+    # Deploy container
+    # Copy all yaml files under deploy directory
+    cp -r ./deploy/kubernetes/ "${CSI_PROW_WORK}/deploy/"
+
+    # Load built images into kind cluster and change yaml files to use the images if CSI_PROW_BUILD_JOB is true
+    if ${CSI_PROW_BUILD_JOB}; then
+
+        # Ignore: Double quote to prevent globbing and word splitting.
+        # Ignore: To read lines rather than words, pipe/redirect to a 'while read' loop.
+        # shellcheck disable=SC2086 disable=SC2013
+        for i in $(grep '^\s*CMDS\s*=' Makefile | sed -e 's/\s*CMDS\s*=//'); do
+            # Load image into kind
+            kind load docker-image --name csi-prow $i:csiprow || die "could not load the $i:csiprow image into the kind cluster"
+
+            # Replace tags from latest to csiprow
+            find ${CSI_PROW_WORK}/deploy/ -name "*.yaml" | xargs sed -i 's/image: .*'"$i"':.*$/image: '"$i"':csiprow/g'
+        done
+    fi
+    # Create all resources in yaml files
+    kubectl create -f "${CSI_PROW_WORK}/deploy/"
+}
+
+
 # collect logs and cluster status (like the version of all components, Kubernetes version, test version)
 collect_cluster_info () {
     cat <<EOF
@@ -791,6 +829,27 @@ run_e2e () (
 
     cd "${GOPATH}/src/${CSI_PROW_E2E_IMPORT_PATH}" &&
     run_with_loggers ginkgo -v "$@" "${CSI_PROW_WORK}/e2e.test" -- -report-dir "${ARTIFACTS}" -storage.testdriver="${CSI_PROW_WORK}/test-driver.yaml"
+)
+
+# Runs the E2E test suite in a sub-shell.
+run_custom_e2e () (
+    name="$1"
+    shift
+
+    install_ginkgo || die "installing ginkgo failed"
+
+    # Rename, merge and filter JUnit files. Necessary in case that we run the E2E suite again
+    # and to avoid the large number of "skipped" tests that we get from using
+    # the full Kubernetes E2E testsuite while only running a few tests.
+    move_junit () {
+        if ls "${ARTIFACTS}"/junit_[0-9]*.xml 2>/dev/null >/dev/null; then
+            run_filter_junit -t="External Storage" -o "${ARTIFACTS}/junit_${name}.xml" "${ARTIFACTS}"/junit_[0-9]*.xml && rm -f "${ARTIFACTS}"/junit_[0-9]*.xml
+        fi
+    }
+    trap move_junit EXIT
+
+    cd "${GOPATH}/src/${CSI_PROW_E2E_IMPORT_PATH}" &&
+    run_with_loggers "${CSI_PROW_WORK}/tests" --ginkgo.v "$@" -- -report-dir "${ARTIFACTS}"
 )
 
 # Run csi-sanity against installed CSI driver.
@@ -1013,6 +1072,39 @@ main () {
                          -focus="External.Storage.*($(regex_join "${CSI_PROW_E2E_SERIAL}"))" \
                          -skip="$(regex_join "${CSI_PROW_E2E_ALPHA}" "${CSI_PROW_E2E_SKIP}")"; then
                         warn "E2E serial failed"
+                        ret=1
+                    fi
+                fi
+            fi
+        fi
+
+        if tests_need_non_alpha_cluster_for_repo_driver; then
+            start_cluster || die "starting the non-alpha cluster failed"
+
+            if install_repo_csi_driver; then
+                collect_cluster_info
+
+                if [ ! -f "${CSI_PROW_WORK}/tests" ]; then
+                    run_with_go "${CSI_PROW_GO_VERSION_BUILD}" make build-tests || die "'make build-tests' failed"
+                    ln -s ${REPO_DIR}/bin/tests "${CSI_PROW_WORK}"
+                fi
+
+                if tests_enabled "repo-custom-parallel"; then
+                    # Ignore: Double quote to prevent globbing and word splitting.
+                    # shellcheck disable=SC2086
+                    if ! run_custom_e2e custom-parallel ${CSI_PROW_GINKO_CUSTOM_PARALLEL} \
+                         -ginkgo.focus="\[sig-storage\] CSI Volumes.*\[Testpattern: Pre-provisioned" \
+                         -ginkgo.skip="$(regex_join "${CSI_PROW_E2E_SERIAL}" "${CSI_PROW_E2E_ALPHA}" "${CSI_PROW_E3E_SKIP}")"; then
+                        warn "E2E custom parallel failed"
+                        ret=1
+                    fi
+                fi
+
+                if tests_enabled "repo-custom-serial"; then
+                    if ! run_custom_e2e custom-serial \
+                         -ginkgo.focus="\[sig-storage\] CSI Volumes.*\[Testpattern: Pre-provisioned.*($(regex_join "${CSI_PROW_E2E_SERIAL}"))" \
+                         -ginkgo.skip="$(regex_join "${CSI_PROW_E2E_ALPHA}" "${CSI_PROW_E2E_SKIP}")"; then
+                        warn "E2E custom serial failed"
                         ret=1
                     fi
                 fi
