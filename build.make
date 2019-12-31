@@ -62,6 +62,12 @@ endif
 
 ARCH := $(if $(GOARCH),$(GOARCH),$(shell go env GOARCH))
 
+# Specific BASE_IMAGE for different arch, default BASE_IMAGE gcr.io/distroless is for x86, discolix/static is for arm.
+BASE_IMAGE=gcr.io/distroless/static:latest
+ifeq (${ARCH}, arm64)
+  BASE_IMAGE=discolix/static:latest
+endif
+
 # Specific packages can be excluded from each of the tests below by setting the *_FILTER_CMD variables
 # to something like "| grep -v 'github.com/kubernetes-csi/project/pkg/foobar'". See usage below.
 
@@ -74,7 +80,7 @@ build-%: check-go-version-go
 	fi
 
 container-%: build-%
-	docker build -t $*:latest -f $(shell if [ -e ./cmd/$*/Dockerfile ]; then echo ./cmd/$*/Dockerfile; else echo Dockerfile; fi) --label revision=$(REV) .
+	docker build -t $*:latest -f $(shell if [ -e ./cmd/$*/Dockerfile ]; then echo ./cmd/$*/Dockerfile; else echo Dockerfile; fi) --label revision=$(REV) --build-arg BASE_IMAGE=${BASE_IMAGE} .
 
 push-%: container-%
 	set -ex; \
