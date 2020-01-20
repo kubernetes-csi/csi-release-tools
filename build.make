@@ -97,6 +97,42 @@ push-%: container-%
 build: $(CMDS:%=build-%)
 container: $(CMDS:%=container-%)
 push: $(CMDS:%=push-%)
+all-push: $(CMDS:%=all-push-%)
+
+export DOCKER_CLI_EXPERIMENTAL=enabled
+
+all-push-%:
+        for arch in amd64 ppc64le; do \
+                IMAGE_WITH_ARCH=$(IMAGE_NAME)-$$arch; \
+                CGO_ENABLED=0 GOOS=linux GOARCH=$$arch go build $(GOFLAGS_VENDOR) -a -ldflags '-X main.version=$(REV) -extldflags "-static"' -o ./bin/$* ./cmd/$*; \
+                docker build -t $$IMAGE_WITH_ARCH:latest -f $(shell if [ -e ./cmd/$*/Dockerfile ]; then echo ./cmd/$*/Dockerfile; else echo Dockerfile; fi) --label revision=$(REV) .; \
+                push_image () { \
+                        docker tag $$IMAGE_WITH_ARCH:latest $$IMAGE_WITH_ARCH:$$tag; \
+                        docker push $$IMAGE_WITH_ARCH:$$tag; \
+                        if [ "$$arch" = "amd64" ]; then \
+                                docker tag $$IMAGE_WITH_ARCH:latest $(IMAGE_NAME):$$tag; \
+                                docker push $(IMAGE_NAME):$$tag; \
+                        fi; \
+                }; \
+                for tag in $(IMAGE_TAGS); do \
+                        if [ "$$tag" = "canary" ] || echo "$$tag" | grep -q -e '-canary$$'; then \
+                                : "creating or overwriting canary image"; \
+                                push_image; \
+                        elif docker pull $$IMAGE_WITH_ARCH:$$tag 2>&1 | tee /dev/stderr | grep -q "manifest for $(IMAGE_NAME):$$tag not found"; then \
+                                : "creating release image"; \
+                                push_image; \
+                        else \
+                                : "release image $(IMAGE_NAME):$$tag already exists, skipping push"; \
+                        fi; \
+                done; \
+        done; \
+        for tag in $(IMAGE_TAGS); do \
+                docker manifest create $(IMAGE_NAME):$$tag $(shell echo $(ALL_ARCH) | sed -e "s~[^ ]*~$(IMAGE_NAME)\-&:\$$tag~g"); \
+                for arch in amd64 ppc64le; do \
+                        docker manifest annotate --arch $$arch $(IMAGE_NAME):$$tag $(IMAGE_NAME)-$$arch:$$tag; \
+                done; \
+                docker manifest push $(IMAGE_NAME):$$tag; \
+        done; \
 
 clean:
 	-rm -rf bin
