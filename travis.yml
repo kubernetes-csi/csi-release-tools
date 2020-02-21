@@ -2,14 +2,15 @@ language: go
 sudo: required
 services:
   - docker
+arch:
+  - amd64
+  - s390x
 git:
   depth: false
-matrix:
-  include:
-  - go: 1.13.3
+go: 1.13.3
 before_script:
 - mkdir -p bin
-- wget https://github.com/golang/dep/releases/download/v0.5.1/dep-linux-amd64 -O bin/dep
+- wget https://github.com/golang/dep/releases/download/v0.5.1/dep-linux-$(go env GOARCH) -O bin/dep
 - chmod u+x bin/dep
 - export PATH=$PWD/bin:$PATH
 script:
