@@ -6,22 +6,23 @@ in the top-level Makefile.
 
 The rules include support for building and pushing Docker images, with
 the following features:
- - one or more command and image per project
- - push canary and/or tagged release images
- - automatically derive the image tag(s) from repo tags
- - the source code revision is stored in a "revision" image label
- - never overwrites an existing release image
 
-Usage
------
+- one or more command and image per project
+- push canary and/or tagged release images
+- automatically derive the image tag(s) from repo tags
+- the source code revision is stored in a "revision" image label
+- never overwrites an existing release image
+
+## Usage
 
 The expected repository layout is:
- - `cmd/*/*.go` - source code for each command
- - `cmd/*/Dockerfile` - docker file for each command or
+
+- `cmd/*/*.go` - source code for each command
+- `cmd/*/Dockerfile` - docker file for each command or
    Dockerfile in the root when only building a single command
- - `Makefile` - includes `release-tools/build.make` and sets
+- `Makefile` - includes `release-tools/build.make` and sets
    configuration variables
- - `.travis.yml` - a symlink to `release-tools/.travis.yml`
+- `.travis.yml` - a symlink to `release-tools/.travis.yml`
 
 To create a release, tag a certain revision with a name that
 starts with `v`, for example `v1.0.0`, then `make push`
@@ -35,8 +36,7 @@ Release branches are expected to be named `release-x.y` for releases
 `x.y.z`. Building from such a branch creates `x.y-canary`
 images. Building from master creates the main `canary` image.
 
-Sharing and updating
---------------------
+## Sharing and updating
 
 [`git subtree`](https://github.com/git/git/blob/master/contrib/subtree/git-subtree.txt)
 is the recommended way of maintaining a copy of the rules inside the
@@ -50,8 +50,7 @@ Cheat sheet:
 - `git subtree pull --prefix=release-tools https://github.com/kubernetes-csi/csi-release-tools.git master` - update local copy to latest upstream (whenever upstream changes)
 - edit, `git commit`, `git subtree push --prefix=release-tools git@github.com:<user>/csi-release-tools.git <my-new-or-existing-branch>` - push to a new branch before submitting a PR
 
-verify-shellcheck.sh
---------------------
+## verify-shellcheck.sh script
 
 The [verify-shellcheck.sh](./verify-shellcheck.sh) script in this repo
 is a stripped down copy of the [corresponding
@@ -62,8 +61,7 @@ errors shell scripts, like missing quotation marks. The default
 scripts in this directory. Components can add more directories to
 `TEST_SHELLCHECK_DIRS` to check also other scripts.
 
-End-to-end testing
-------------------
+## End-to-end testing
 
 A repo that wants to opt into testing via Prow must set up a top-level
 `.prow.sh`. Typically that will source `prow.sh` and then transfer
@@ -78,12 +76,13 @@ main
 
 All Kubernetes-CSI repos are expected to switch to Prow. For details
 on what is enabled in Prow, see
-https://github.com/kubernetes/test-infra/tree/master/config/jobs/kubernetes-csi
+<https://github.com/kubernetes/test-infra/tree/master/config/jobs/kubernetes-csi>
 
 Test results for periodic jobs are visible in
-https://testgrid.k8s.io/sig-storage-csi-ci
+<https://testgrid.k8s.io/sig-storage-csi-ci>
 
 It is possible to reproduce the Prow testing locally on a suitable machine:
+
 - Linux host
 - Docker installed
 - code to be tested checkout out in `$GOPATH/src/<import path>`
@@ -98,17 +97,20 @@ When it terminates, the following command can be used to get access to
 the Kubernetes cluster that was brought up for testing (assuming that
 this step succeeded):
 
-    export KUBECONFIG="$(kind get kubeconfig-path --name="csi-prow")"
+```console
+export KUBECONFIG="$(kind get kubeconfig-path --name="csi-prow")"`
+```
 
 It is possible to control the execution via environment variables. See
 `prow.sh` for details. Particularly useful is testing against different
 Kubernetes releases:
 
-    CSI_PROW_KUBERNETES_VERSION=1.13.3 ./.prow.sh
-    CSI_PROW_KUBERNETES_VERSION=latest ./.prow.sh
+```console
+CSI_PROW_KUBERNETES_VERSION=1.13.3 ./.prow.sh
+CSI_PROW_KUBERNETES_VERSION=latest ./.prow.sh
+```
 
-Dependencies and vendoring
---------------------------
+## Dependencies and vendoring
 
 Most projects will (eventually) use `go mod` to manage
 dependencies. `dep` is also still supported by `csi-release-tools`,
@@ -117,6 +119,7 @@ but not documented here because it's not recommended anymore.
 The usual instructions for using [go
 modules](https://github.com/golang/go/wiki/Modules) apply. Here's a cheat sheet
 for some of the relevant commands:
+
 - list available updates: `GO111MODULE=on go list -u -m all`
 - update or add a single dependency: `GO111MODULE=on go get <package>`
 - update all dependencies to their next minor or patch release:
@@ -143,12 +146,14 @@ longer deemed necessary, then a project can also remove the directory.
 
 Conversion of a repository that uses `dep` to `go mod` can be done with:
 
+```console
     GO111MODULE=on go mod init
     release-tools/go-get-kubernetes.sh <current Kubernetes version from Gopkg.toml>
     GO111MODULE=on go mod tidy
     GO111MODULE=on go mod vendor
     git rm -f Gopkg.toml Gopkg.lock
     git add go.mod go.sum vendor
+```
 
 ### Updating Kubernetes dependencies
 
@@ -158,9 +163,10 @@ versioning](https://github.com/kubernetes/kubernetes/issues/72638)
 prevents `go mod` from finding newer releases. Importing directly from
 `kubernetes/kubernetes` also needs `replace` statements to override
 the fake `v0.0.0` versions
-(https://github.com/kubernetes/kubernetes/issues/79384). The
+(<https://github.com/kubernetes/kubernetes/issues/79384>). The
 `go-get-kubernetes.sh` script can be used to update all packages in
 lockstep to a different Kubernetes version. Example usage:
-```
-$ ./release-tools/go-get-kubernetes.sh 1.16.4
+
+```console
+$./release-tools/go-get-kubernetes.sh 1.16.4
 ```

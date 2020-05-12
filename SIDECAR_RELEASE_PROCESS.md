@@ -19,6 +19,7 @@ The release manager must:
   [Example](https://github.com/kubernetes/org/pull/1467)
 
 ## Updating CI Jobs
+
 Whenever a new Kubernetes minor version is released, our kubernetes-csi CI jobs
 must be updated.
 
@@ -48,6 +49,7 @@ naming convention `<hostpath-deployment-version>-on-<kubernetes-version>`.
    Kubernetes versions that are no longer supported.
 
 ## Release Process
+
 1. Identify all issues and ongoing PRs that should go into the release, and
   drive them to resolution.
 1. Download v2.8+ [K8s release notes
@@ -55,17 +57,21 @@ naming convention `<hostpath-deployment-version>-on-<kubernetes-version>`.
 1. Generate release notes for the release. Replace arguments with the relevant
   information.
     * For new minor releases on master:
-        ```
+
+      ```shell
         GITHUB_TOKEN=<token> release-notes --discover=mergebase-to-latest
         --github-org=kubernetes-csi --github-repo=external-provisioner
         --required-author="" --output out.md
         ```
+
     * For new patch releases on a release branch:
-        ```
+
+        ```shell
         GITHUB_TOKEN=<token> release-notes --discover=patch-to-latest --branch=release-1.1
         --github-org=kubernetes-csi --github-repo=external-provisioner
         --required-author="" --output out.md
         ```
+
 1. Compare the generated output to the new commits for the release to check if
    any notable change missed a release note.
 1. Reword release notes as needed. Make sure to check notes for breaking
