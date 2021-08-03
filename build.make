@@ -185,24 +185,24 @@ $(CMDS:%=push-multiarch-%): push-multiarch-%: check-pull-base-ref build-%
 		done; \
 		docker manifest push -p $(IMAGE_NAME):$$tag; \
 	}; \
-	if [ $(PULL_BASE_REF) = "master" ]; then \
+	if [ ${PULL_BASE_REF} = "master" ]; then \
 			: "creating or overwriting canary image"; \
 			pushMultiArch canary; \
-	elif echo $(PULL_BASE_REF) | grep -q -e 'release-*' ; then \
+	elif echo ${PULL_BASE_REF} | grep -q -e 'release-*' ; then \
 			: "creating or overwriting canary image for release branch"; \
-			release_canary_tag=$$(echo $(PULL_BASE_REF) | cut -f2 -d '-')-canary; \
+			release_canary_tag=$$(echo ${PULL_BASE_REF} | cut -f2 -d '-')-canary; \
 			pushMultiArch $$release_canary_tag; \
-	elif docker pull $(IMAGE_NAME):$(PULL_BASE_REF) 2>&1 | tee /dev/stderr | grep -q "manifest for $(IMAGE_NAME):$(PULL_BASE_REF) not found"; then \
+	elif docker pull $(IMAGE_NAME):${PULL_BASE_REF} 2>&1 | tee /dev/stderr | grep -q "manifest for $(IMAGE_NAME):${PULL_BASE_REF} not found"; then \
 			: "creating release image"; \
-			pushMultiArch $(PULL_BASE_REF); \
+			pushMultiArch ${PULL_BASE_REF}; \
 	else \
-			: "ERROR: release image $(IMAGE_NAME):$(PULL_BASE_REF) already exists: a new tag is required!"; \
+			: "ERROR: release image $(IMAGE_NAME):${PULL_BASE_REF} already exists: a new tag is required!"; \
 			exit 1; \
 	fi
 
 .PHONY: check-pull-base-ref
 check-pull-base-ref:
-	if ! [ "$(PULL_BASE_REF)" ]; then \
+	if ! [ "${PULL_BASE_REF}" ]; then \
 		echo >&2 "ERROR: PULL_BASE_REF must be set to 'master', 'release-x.y', or a tag name."; \
 		exit 1; \
 	fi
