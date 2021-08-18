@@ -58,13 +58,13 @@ naming convention `<hostpath-deployment-version>-on-<kubernetes-version>`.
     * For new minor releases on master:
         ```bash
         GITHUB_TOKEN=<token> release-notes --discover=mergebase-to-latest
-        --github-org=kubernetes-csi --github-repo=external-provisioner
+        --org=kubernetes-csi --repo=external-provisioner
         --required-author="" --output out.md
         ```
     * For new patch releases on a release branch:
         ```bash
         GITHUB_TOKEN=<token> release-notes --discover=patch-to-latest --branch=release-1.1
-        --github-org=kubernetes-csi --github-repo=external-provisioner
+        --org=kubernetes-csi --repo=external-provisioner
         --required-author="" --output out.md
         ```
 1. Compare the generated output to the new commits for the release to check if
