@@ -77,9 +77,9 @@ endif
 BUILD_PLATFORMS =
 
 # Add go ldflags using LDFLAGS at the time of compilation.
-IMPORTPATH_LDFLAGS = -X main.version=$(REV)
-EXT_LDFLAGS = -extldflags "-static"
-LDFLAGS =
+IMPORTPATH_LDFLAGS ?= -X main.version=$(REV)
+EXT_LDFLAGS ?= -extldflags "-static"
+LDFLAGS ?=
 FULL_LDFLAGS = $(LDFLAGS) $(IMPORTPATH_LDFLAGS) $(EXT_LDFLAGS)
 # This builds each command (= the sub-directories of ./cmd) for the target platform(s)
 # defined by BUILD_PLATFORMS.
