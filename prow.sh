@@ -230,6 +230,7 @@ configvar CSI_PROW_E2E_IMPORT_PATH "k8s.io/kubernetes" "E2E package"
 
 # Local path for e2e tests. Set to "none" to disable.
 configvar CSI_PROW_SIDECAR_E2E_IMPORT_PATH "none" "CSI Sidecar E2E package"
+configvar VOLUME_MODE_CONVERSION_TESTS "false" "Enable volume mode conversion feature flag. Used in sidecar E2E tests."
 
 # csi-sanity testing from the csi-test repo can be run against the installed
 # CSI driver. For this to work, deploying the driver must expose the Unix domain
@@ -288,6 +289,10 @@ sanity_enabled () {
 
 sidecar_tests_enabled () {
   [ "${CSI_PROW_SIDECAR_E2E_IMPORT_PATH}" != "none" ]
+}
+
+volume_mode_conversion () {
+  [ "${VOLUME_MODE_CONVERSION_TESTS}" == "true" ]
 }
 
 tests_need_kind () {
@@ -745,7 +750,7 @@ install_csi_driver () {
     # Ignore: Double quote to prevent globbing and word splitting.
     # It's intentional here for $images.
     # shellcheck disable=SC2086
-    if ! run env "CSI_PROW_TEST_DRIVER=${CSI_PROW_WORK}/test-driver.yaml" $images "${deploy_driver}"; then
+    if ! run env "CSI_PROW_TEST_DRIVER=${CSI_PROW_WORK}/test-driver.yaml" $images "VOLUME_MODE_CONVERSION_TESTS=${VOLUME_MODE_CONVERSION_TESTS}" "${deploy_driver}"; then
         # Collect information about failed deployment before failing.
         collect_cluster_info
         (start_loggers >/dev/null; wait)
@@ -805,6 +810,7 @@ install_snapshot_controller() {
   done
 
   SNAPSHOT_CONTROLLER_YAML="${CONTROLLER_DIR}/deploy/kubernetes/snapshot-controller/setup-snapshot-controller.yaml"
+  snapshot_yaml="$(kubectl apply --dry-run=client -o yaml -f "$SNAPSHOT_CONTROLLER_YAML")"
   if [[ ${REPO_DIR} == *"external-snapshotter"* ]]; then
       # snapshot-controller image built from the PR will get a "csiprow" tag.
       # Load it into the "kind" cluster so that we can deploy it.
@@ -846,11 +852,7 @@ install_snapshot_controller() {
               fi
               echo "$line"
           done)"
-          if ! echo "$modified" | kubectl apply -f -; then
-              echo "modified version of $i:"
-              echo "$modified"
-              exit 1
-          fi
+          snapshot_yaml="$modified"
       done
   elif [ "${CSI_PROW_DRIVER_CANARY}" = "canary" ]; then
       echo "Deploying snapshot-controller from ${SNAPSHOT_CONTROLLER_YAML} with canary images."
@@ -859,14 +861,17 @@ install_snapshot_controller() {
       # shellcheck disable=SC2001
       modified="$(echo "$yaml" | sed -e "s;image: .*/\([^/:]*\):.*;image: ${CSI_PROW_DRIVER_CANARY_REGISTRY}/\1:canary;")"
       diff <(echo "$yaml") <(echo "$modified")
-      if ! echo "$modified" | kubectl apply -f -; then
-          echo "modified version of $SNAPSHOT_CONTROLLER_YAML:"
-          echo "$modified"
-          exit 1
-      fi
-  else
-      echo "kubectl apply -f $SNAPSHOT_CONTROLLER_YAML"
-      kubectl apply -f "$SNAPSHOT_CONTROLLER_YAML"
+      snapshot_yaml="$modified"
+  elif volume_mode_conversion; then
+        echo "Deploying snapshot-controller with --prevent-volume-mode-conversion=true"
+        run curl "${SNAPSHOT_CONTROLLER_YAML}" --output "${CSI_PROW_WORK}/snapshot-controller.yaml" --silent --location
+        sed -i -e 's/# end snapshot controller args/- \"--prevent-volume-mode-conversion=true\"\n            # end snapshot controller args/' "${CSI_PROW_WORK}/snapshot-controller.yaml"
+        snapshot_yaml="$(kubectl apply --dry-run=client -o yaml -f "${CSI_PROW_WORK}/snapshot-controller.yaml")"
+  fi
+  if ! echo "$snapshot_yaml" | kubectl apply -f -; then
+      echo "applying snapshotter yaml failed $SNAPSHOT_CONTROLLER_YAML:"
+      echo "$snapshot_yaml"
+      exit 1
   fi
 
   cnt=0
