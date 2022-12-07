@@ -784,6 +784,15 @@ install_snapshot_crds() {
   done
 }
 
+# Enable feature flags in the snapshot-controller.
+enable_snapshot_controller_feature_flags () {
+  SNAPSHOT_CONTROLLER_YAML="${CSI_PROW_WORK}/snapshot-controller.yaml"
+  if volume_mode_conversion; then
+    echo "Deploying snapshot-controller with --prevent-volume-mode-conversion=true"
+    sed -i -e 's/# end snapshot controller args/- \"--prevent-volume-mode-conversion=true\"\n            # end snapshot controller args/' "${SNAPSHOT_CONTROLLER_YAML}"
+  fi
+}
+
 # Install snapshot controller and associated RBAC, retrying until the pod is running.
 install_snapshot_controller() {
   CONTROLLER_DIR="https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/${CSI_SNAPSHOTTER_VERSION}"
@@ -809,8 +818,10 @@ install_snapshot_controller() {
     sleep 10
   done
 
-  SNAPSHOT_CONTROLLER_YAML="${CONTROLLER_DIR}/deploy/kubernetes/snapshot-controller/setup-snapshot-controller.yaml"
-  snapshot_yaml="$(kubectl apply --dry-run=client -o yaml -f "$SNAPSHOT_CONTROLLER_YAML")"
+  run curl "${CONTROLLER_DIR}/deploy/kubernetes/snapshot-controller/setup-snapshot-controller.yaml" --output "${CSI_PROW_WORK}/snapshot-controller.yaml" --silent --location
+  SNAPSHOT_CONTROLLER_YAML="${CSI_PROW_WORK}/snapshot-controller.yaml"
+  enable_snapshot_controller_feature_flags || die "failed to enable snapshot-controller feature flags"
+
   if [[ ${REPO_DIR} == *"external-snapshotter"* ]]; then
       # snapshot-controller image built from the PR will get a "csiprow" tag.
       # Load it into the "kind" cluster so that we can deploy it.
@@ -852,7 +863,11 @@ install_snapshot_controller() {
               fi
               echo "$line"
           done)"
-          snapshot_yaml="$modified"
+          if ! echo "$modified" | kubectl apply -f -; then
+            echo "modified version of $i:"
+            echo "$modified"
+            exit 1
+          fi
       done
   elif [ "${CSI_PROW_DRIVER_CANARY}" = "canary" ]; then
       echo "Deploying snapshot-controller from ${SNAPSHOT_CONTROLLER_YAML} with canary images."
@@ -861,17 +876,14 @@ install_snapshot_controller() {
       # shellcheck disable=SC2001
       modified="$(echo "$yaml" | sed -e "s;image: .*/\([^/:]*\):.*;image: ${CSI_PROW_DRIVER_CANARY_REGISTRY}/\1:canary;")"
       diff <(echo "$yaml") <(echo "$modified")
-      snapshot_yaml="$modified"
-  elif volume_mode_conversion; then
-        echo "Deploying snapshot-controller with --prevent-volume-mode-conversion=true"
-        run curl "${SNAPSHOT_CONTROLLER_YAML}" --output "${CSI_PROW_WORK}/snapshot-controller.yaml" --silent --location
-        sed -i -e 's/# end snapshot controller args/- \"--prevent-volume-mode-conversion=true\"\n            # end snapshot controller args/' "${CSI_PROW_WORK}/snapshot-controller.yaml"
-        snapshot_yaml="$(kubectl apply --dry-run=client -o yaml -f "${CSI_PROW_WORK}/snapshot-controller.yaml")"
-  fi
-  if ! echo "$snapshot_yaml" | kubectl apply -f -; then
-      echo "applying snapshotter yaml failed $SNAPSHOT_CONTROLLER_YAML:"
-      echo "$snapshot_yaml"
-      exit 1
+      if ! echo "$modified" | kubectl apply -f -; then
+        echo "modified version of $SNAPSHOT_CONTROLLER_YAML:"
+        echo "$modified"
+        exit 1
+      fi
+  else
+    echo "kubectl apply -f $SNAPSHOT_CONTROLLER_YAML"
+    kubectl apply -f "$SNAPSHOT_CONTROLLER_YAML"
   fi
 
   cnt=0
