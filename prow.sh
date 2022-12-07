@@ -864,9 +864,9 @@ install_snapshot_controller() {
               echo "$line"
           done)"
           if ! echo "$modified" | kubectl apply -f -; then
-            echo "modified version of $i:"
-            echo "$modified"
-            exit 1
+              echo "modified version of $i:"
+              echo "$modified"
+              exit 1
           fi
       done
   elif [ "${CSI_PROW_DRIVER_CANARY}" = "canary" ]; then
@@ -877,13 +877,13 @@ install_snapshot_controller() {
       modified="$(echo "$yaml" | sed -e "s;image: .*/\([^/:]*\):.*;image: ${CSI_PROW_DRIVER_CANARY_REGISTRY}/\1:canary;")"
       diff <(echo "$yaml") <(echo "$modified")
       if ! echo "$modified" | kubectl apply -f -; then
-        echo "modified version of $SNAPSHOT_CONTROLLER_YAML:"
-        echo "$modified"
-        exit 1
+          echo "modified version of $SNAPSHOT_CONTROLLER_YAML:"
+          echo "$modified"
+          exit 1
       fi
   else
-    echo "kubectl apply -f $SNAPSHOT_CONTROLLER_YAML"
-    kubectl apply -f "$SNAPSHOT_CONTROLLER_YAML"
+      echo "kubectl apply -f $SNAPSHOT_CONTROLLER_YAML"
+      kubectl apply -f "$SNAPSHOT_CONTROLLER_YAML"
   fi
 
   cnt=0
