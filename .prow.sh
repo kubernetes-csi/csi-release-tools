@@ -18,6 +18,8 @@
 # repos use prow.sh for that, but as csi-release-tools isn't a normal
 # repo with some Go code in it, it has a custom Prow test script.
 
+# Comment that should not change the CI results
+
 ./verify-shellcheck.sh "$(pwd)"
 ./verify-spelling.sh "$(pwd)"
 ./verify-boilerplate.sh "$(pwd)"
