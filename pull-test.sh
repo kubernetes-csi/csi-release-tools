@@ -26,6 +26,11 @@ CSI_RELEASE_TOOLS_DIR="$(pwd)"
 # Update the other repo.
 cd "$PULL_TEST_REPO_DIR"
 git subtree pull --squash --prefix=release-tools "$CSI_RELEASE_TOOLS_DIR" master
+# Start of test
+echo "Test!!!"
+git diff-index HEAD
+echo "Done testing!!!"
+# End of test
 git log -n2
 
 # Now fall through to testing.
