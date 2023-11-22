@@ -20,12 +20,30 @@
 
 set -ex
 
+git version
+
 # It must be called inside the updated csi-release-tools repo.
 CSI_RELEASE_TOOLS_DIR="$(pwd)"
 
+git status
+git diff
+git diff-index HEAD
+
 # Update the other repo.
 cd "$PULL_TEST_REPO_DIR"
-git subtree pull --squash --prefix=release-tools "$CSI_RELEASE_TOOLS_DIR" master
+
+git branch
+
+# git reset --hard # Shouldn't be necessary, but somehow is to avoid "fatal: working tree has modifications.  Cannot add." (https://stackoverflow.com/questions/3623351/git-subtree-pull-says-that-the-working-tree-has-modifications-but-git-status-sa)
+if ! git subtree pull -d --squash --prefix=release-tools "$CSI_RELEASE_TOOLS_DIR" master; then
+    set +e
+    git status
+    git diff
+    git diff-index HEAD
+    git reset --hard
+    git diff-index HEAD
+    exit 1
+fi
 git log -n2
 
 # Now fall through to testing.
