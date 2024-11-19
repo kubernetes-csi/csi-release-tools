@@ -20,6 +20,13 @@
 
 set -ex
 
+set
+export NO_LAZY_FETCH_ENVIRONMENT=0
+git version
+git show 6d2f474e1372a612f5248689cfec36c16f6f6e00
+git show b18c53581356c52a220a2baf1c8cf3fd9c57dda6
+git fetch
+
 # It must be called inside the updated csi-release-tools repo.
 CSI_RELEASE_TOOLS_DIR="$(pwd)"
 
