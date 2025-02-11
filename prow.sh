@@ -218,7 +218,7 @@ configvar CSI_PROW_DRIVER_CANARY "${CSI_PROW_HOSTPATH_CANARY}" "driver image ove
 
 # Image registry to use for canary images.
 # Only valid if CSI_PROW_DRIVER_CANARY == "canary".
-configvar CSI_PROW_DRIVER_CANARY_REGISTRY "gcr.io/k8s-staging-sig-storage" "registry for canary images"
+configvar CSI_PROW_DRIVER_CANARY_REGISTRY "us-central1-docker.pkg.dev/k8s-staging-sig-storage" "registry for canary images"
 
 # The E2E testing can come from an arbitrary repo. The expectation is that
 # the repo supports "go test ./test/e2e -args --storage.testdriver" (https://github.com/kubernetes/kubernetes/pull/72836)
@@ -954,13 +954,13 @@ patch_kubernetes () {
     local source="$1" target="$2"
 
     if [ "${CSI_PROW_DRIVER_CANARY}" = "canary" ]; then
-        # We cannot replace registry.k8s.io/sig-storage with gcr.io/k8s-staging-sig-storage because
+        # We cannot replace registry.k8s.io/sig-storage with us-central1-docker.pkg.dev/k8s-staging-sig-storage because
         # e2e.test does not support it (see test/utils/image/manifest.go). Instead we
         # invoke the e2e.test binary with KUBE_TEST_REPO_LIST set to a file that
         # overrides that registry.
         find "$source/test/e2e/testing-manifests/storage-csi/mock" -name '*.yaml' -print0 | xargs -0 sed -i -e 's;registry.k8s.io/sig-storage/\(.*\):v.*;registry.k8s.io/sig-storage/\1:canary;'
         cat >"$target/e2e-repo-list" <<EOF
-sigStorageRegistry: gcr.io/k8s-staging-sig-storage
+sigStorageRegistry: us-central1-docker.pkg.dev/k8s-staging-sig-storage
 EOF
         cat >&2 <<EOF
 

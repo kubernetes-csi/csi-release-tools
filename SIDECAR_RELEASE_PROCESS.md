@@ -130,7 +130,7 @@ https://prow.k8s.io/?job=canary-csi-test-push-images
 
 #### Verify images
 
-Canary and staged images can be viewed at https://console.cloud.google.com/gcr/images/k8s-staging-sig-storage
+Canary and staged images can be viewed at https://console.cloud.google.com/artifacts/docker/k8s-staging-sig-storage
 
 Promoted images can be viewed at https://console.cloud.google.com/gcr/images/k8s-artifacts-prod/us/sig-storage
 
