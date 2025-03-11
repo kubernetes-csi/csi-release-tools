@@ -31,7 +31,7 @@ steps:
     env:
     - GIT_TAG=${_GIT_TAG}
     - PULL_BASE_REF=${_PULL_BASE_REF}
-    - REGISTRY_NAME=gcr.io/${_STAGING_PROJECT}
+    - REGISTRY_NAME=us-central1-docker.pkg.dev/${_STAGING_PROJECT}
     - HOME=/root
 substitutions:
   # _GIT_TAG will be filled with a git-based tag for the image, of the form vYYYYMMDD-hash, and
@@ -40,8 +40,8 @@ substitutions:
   # _PULL_BASE_REF will contain the ref that was pushed to trigger this build -
   # a branch like 'master' or 'release-0.2', or a tag like 'v0.2'.
   _PULL_BASE_REF: 'master'
-  # The default gcr.io staging project for Kubernetes-CSI
-  # (=> https://console.cloud.google.com/gcr/images/k8s-staging-sig-storage/GLOBAL).
+  # The default us-central1-docker.pkg.dev staging project for Kubernetes-CSI
+  # (=> https://console.cloud.google.com/artifacts/docker/k8s-staging-sig-storage/us-central1).
   # Might be overridden in the Prow build job for a repo which wants
   # images elsewhere.
   _STAGING_PROJECT: 'k8s-staging-sig-storage'
