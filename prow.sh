@@ -555,14 +555,6 @@ list_gates () (
 # with https://kind.sigs.k8s.io/docs/user/configuration/#runtime-config
 list_api_groups () (
     set -f; IFS=','
-    
-    # If the volumegroupsnapshot gate is enabled, output required API groups
-    if ${CSI_PROW_ENABLE_GROUP_SNAPSHOT}; then
-        echo '   "api/ga": "true"'
-        echo '   "storage.k8s.io/v1alpha1": "true"'
-        echo '   "storage.k8s.io/v1beta1": "true"'
-    fi
-
     # Ignore: Double quote to prevent globbing and word splitting.
     # shellcheck disable=SC2086
     set -- $1
@@ -856,20 +848,20 @@ inject_vgs_feature_gate() {
   fi
 }
 
-# Replace controller image based on the deployment mode
+# Replace the snapshot controller image based on the test mode
 # Arguments:
 #   $1: yaml content
-#   $2: mode ("external-snapshotter", "canary", or "default")
-#   $3: new_tag (for external-snapshotter mode)
+#   $2: mode ("local-build", "canary", or "default")
+#   $3: new_tag (for local-build mode)
 #   $4: registry (for canary mode)
-replace_controller_image() {
+replace_snapshot_controller_image() {
     local yaml="$1"
     local mode="$2"
     local new_tag="${3:-}"
     local registry="${4:-}"
 
     case "$mode" in
-        external-snapshotter)
+        local-build)
             # Replace with snapshot-controller:new_tag
             echo "$yaml" | sed -E \
                 "s|^([[:space:]]*image: )(.*snapshot-controller):[^[:space:]]*|\1snapshot-controller:${new_tag}|"
@@ -936,7 +928,7 @@ install_snapshot_controller() {
       # Replace image in SNAPSHOT_CONTROLLER_YAML with snapshot-controller:csiprow and deploy
       # NOTE: This logic is similar to the logic here:
       # https://github.com/kubernetes-csi/csi-driver-host-path/blob/v1.4.0/deploy/util/deploy-hostpath.sh#L155
-      modified="$(replace_controller_image "$yaml" "external-snapshotter" "$NEW_TAG" | inject_vgs_feature_gate)"
+      modified="$(replace_snapshot_controller_image "$yaml" "local-build" "$NEW_TAG" | inject_vgs_feature_gate)"
       diff <(echo "$yaml") <(echo "$modified")
       if ! echo "$modified" | kubectl apply -f -; then
           echo "modified version of ${SNAPSHOT_CONTROLLER_YAML}:"
@@ -945,7 +937,7 @@ install_snapshot_controller() {
       fi
   elif [ "${CSI_PROW_DRIVER_CANARY}" = "canary" ]; then
       echo "Deploying snapshot-controller from ${SNAPSHOT_CONTROLLER_YAML} with canary images."
-      modified="$(replace_controller_image "$yaml" "canary" "" "${CSI_PROW_DRIVER_CANARY_REGISTRY}" | inject_vgs_feature_gate)"
+      modified="$(replace_snapshot_controller_image "$yaml" "canary" "" "${CSI_PROW_DRIVER_CANARY_REGISTRY}" | inject_vgs_feature_gate)"
       diff <(echo "$yaml") <(echo "$modified")
       if ! echo "$modified" | kubectl apply -f -; then
           echo "modified version of ${SNAPSHOT_CONTROLLER_YAML}:"
@@ -955,7 +947,7 @@ install_snapshot_controller() {
   else
       echo "kubectl apply -f $SNAPSHOT_CONTROLLER_YAML"
       # Replace snapshot-controller container tag to make it consistent with CSI_SNAPSHOTTER_VERSION
-      modified="$(replace_controller_image "$yaml" "default" | inject_vgs_feature_gate)"
+      modified="$(replace_snapshot_controller_image "$yaml" "default" | inject_vgs_feature_gate)"
       diff <(echo "$yaml") <(echo "$modified")
       if ! echo "$modified" | kubectl apply -f -; then
           echo "modified version of ${SNAPSHOT_CONTROLLER_YAML}:"
@@ -1060,23 +1052,24 @@ install_e2e () {
     if sidecar_tests_enabled; then
         run_with_go "${CSI_PROW_GO_VERSION_BUILD}" go test -c -o "${CSI_PROW_WORK}/e2e-local.test" "${CSI_PROW_SIDECAR_E2E_IMPORT_PATH}"
     fi
-     
+
+    local e2e_src_dir 
     # In kubernetes presubmit do not need clone the src
     if [[ $(basename "${REPO_DIR}") == "kubernetes" ]]; then
         echo "Using existing repo at ${REPO_DIR}"
-        E2E_SRC_DIR="${REPO_DIR}"
+        e2e_src_dir="${REPO_DIR}"
     else
         git_checkout "${CSI_PROW_E2E_REPO}" "${GOPATH}/src/${CSI_PROW_E2E_IMPORT_PATH}" "${CSI_PROW_E2E_VERSION}" --depth=1
-        E2E_SRC_DIR="${GOPATH}/src/${CSI_PROW_E2E_IMPORT_PATH}"
+        e2e_src_dir="${GOPATH}/src/${CSI_PROW_E2E_IMPORT_PATH}"
     fi
 
     if [ "${CSI_PROW_E2E_IMPORT_PATH}" = "k8s.io/kubernetes" ]; then
         patch_kubernetes "${GOPATH}/src/${CSI_PROW_E2E_IMPORT_PATH}" "${CSI_PROW_WORK}" &&
-        go_version="${CSI_PROW_GO_VERSION_E2E:-$(go_version_for_kubernetes "${E2E_SRC_DIR}" "${CSI_PROW_E2E_VERSION}")}" &&
-        run_with_go "$go_version" make WHAT=test/e2e/e2e.test "-C${E2E_SRC_DIR}" &&
-        ln -s "${E2E_SRC_DIR}/_output/bin/e2e.test" "${CSI_PROW_WORK}" &&
-        run_with_go "$go_version" make WHAT=vendor/github.com/onsi/ginkgo/ginkgo "-C${E2E_SRC_DIR}" &&
-        ln -s "${E2E_SRC_DIR}/_output/bin/ginkgo" "${CSI_PROW_BIN}"
+        go_version="${CSI_PROW_GO_VERSION_E2E:-$(go_version_for_kubernetes "${e2e_src_dir}" "${CSI_PROW_E2E_VERSION}")}" &&
+        run_with_go "$go_version" make WHAT=test/e2e/e2e.test "-C${e2e_src_dir}" &&
+        ln -s "${e2e_src_dir}/_output/bin/e2e.test" "${CSI_PROW_WORK}" &&
+        run_with_go "$go_version" make WHAT=vendor/github.com/onsi/ginkgo/ginkgo "-C${e2e_src_dir}" &&
+        ln -s "${e2e_src_dir}/_output/bin/ginkgo" "${CSI_PROW_BIN}"
     else
         run_with_go "${CSI_PROW_GO_VERSION_E2E}" go test -c -o "${CSI_PROW_WORK}/e2e.test" "${CSI_PROW_E2E_IMPORT_PATH}/test/e2e"
     fi
@@ -1103,7 +1096,16 @@ run_with_loggers () (
 
 # Invokes the filter-junit.go tool.
 run_filter_junit () {
-    run_with_go "${CSI_PROW_GO_VERSION_BUILD}" go run "${RELEASE_TOOLS_ROOT}/filter-junit.go" "$@"
+    local go_version ksrc version
+    go_version="${CSI_PROW_GO_VERSION_BUILD}"
+    # Detect if running inside k/k repo
+    if [[ $(basename "${REPO_DIR}") == "kubernetes" ]]; then
+        echo "Using Kubernetes source from CI checkout ..."
+        ksrc="${REPO_DIR}"
+        version="$(git -C "$ksrc" rev-parse HEAD)"
+        go_version="$(go_version_for_kubernetes "$ksrc" "$version")" || die "cannot proceed without knowing Go version for run_filter_junit"
+    fi
+    run_with_go "${go_version}" go run "${RELEASE_TOOLS_ROOT}/filter-junit.go" "$@"
 }
 
 # Runs the E2E test suite in a sub-shell.
@@ -1120,32 +1122,67 @@ run_e2e () (
     # shellcheck disable=SC2329
     move_junit () {
         # shellcheck disable=SC2317
-        FILTER='External.Storage|CSI.mock.volume'
-        # shellcheck disable=SC2317
-        if [ "${CSI_PROW_ENABLE_GROUP_SNAPSHOT}" = "true" ]; then
-            FILTER="${FILTER}|\[Feature:volumegroupsnapshot\]"
-        fi
-
-        # shellcheck disable=SC2317
         if ls "${ARTIFACTS}"/junit_[0-9]*.xml 2>/dev/null >/dev/null; then
             mkdir -p "${ARTIFACTS}/junit/${name}" &&
-                mkdir -p "${ARTIFACTS}/junit/steps" &&
-                run_filter_junit -t="${FILTER}" -o "${ARTIFACTS}/junit/steps/junit_${name}.xml" "${ARTIFACTS}"/junit_[0-9]*.xml &&
+            mkdir -p "${ARTIFACTS}/junit/steps"
+
+            # Skip filter-junit for in-tree (VGS) runs, because k/k already produces clean JUnit
+            if [[ "${name}" == "vgs" ]]; then
+                echo "Skipping filter-junit for ${name} (in-tree tests already generate clean JUnit)"
                 mv "${ARTIFACTS}"/junit_[0-9]*.xml "${ARTIFACTS}/junit/${name}/"
+            else
+                # Run filtering for CSI tests to remove duplicates/skipped cases
+                run_filter_junit -t="External.Storage|CSI.mock.volume" \
+                    -o "${ARTIFACTS}/junit/steps/junit_${name}.xml" \
+                    "${ARTIFACTS}"/junit_[0-9]*.xml &&
+                mv "${ARTIFACTS}"/junit_[0-9]*.xml "${ARTIFACTS}/junit/${name}/"
+            fi
         fi
     }
     trap move_junit EXIT
 
-    if [ "${name}" == "local" ]; then
-        cd "${GOPATH}/src/${CSI_PROW_SIDECAR_E2E_PATH}" &&
-        run_with_loggers env KUBECONFIG="$KUBECONFIG" KUBE_TEST_REPO_LIST="$(if [ -e "${CSI_PROW_WORK}/e2e-repo-list" ]; then echo "${CSI_PROW_WORK}/e2e-repo-list"; fi)" ginkgo --timeout="${CSI_PROW_GINKGO_TIMEOUT}" -v "$@" "${CSI_PROW_WORK}/e2e-local.test" -- -report-dir "${ARTIFACTS}" -report-prefix local
-    elif [ "${CSI_PROW_ENABLE_GROUP_SNAPSHOT}" = "true" ] && [ "${name}" == "parallel-features" ]; then
-        cd "${GOPATH}/src/${CSI_PROW_E2E_IMPORT_PATH}" &&
-        run_with_loggers env KUBECONFIG="$KUBECONFIG" KUBE_TEST_REPO_LIST="$(if [ -e "${CSI_PROW_WORK}/e2e-repo-list" ]; then echo "${CSI_PROW_WORK}/e2e-repo-list"; fi)" ginkgo --timeout="${CSI_PROW_GINKGO_TIMEOUT}" -v "$@" "${CSI_PROW_WORK}/e2e.test" -- -report-dir "${ARTIFACTS}" -report-prefix vgs
-    else
-        cd "${GOPATH}/src/${CSI_PROW_E2E_IMPORT_PATH}" &&
-        run_with_loggers env KUBECONFIG="$KUBECONFIG" KUBE_TEST_REPO_LIST="$(if [ -e "${CSI_PROW_WORK}/e2e-repo-list" ]; then echo "${CSI_PROW_WORK}/e2e-repo-list"; fi)" ginkgo --timeout="${CSI_PROW_GINKGO_TIMEOUT}" -v "$@" "${CSI_PROW_WORK}/e2e.test" -- -report-dir "${ARTIFACTS}" -storage.testdriver="${CSI_PROW_WORK}/test-driver.yaml"
+    
+    # Only set up move_junit for non-VGS tests
+    if [ "$name" != "vgs" ]; then
+        trap move_junit EXIT
     fi
+
+    # Determine ginkgo target and options
+    local ginkgo_target=""
+    local extra_args=""
+    local e2e_src_dir=""
+    local args=()
+
+    if [[ $(basename "${REPO_DIR}") == "kubernetes" ]]; then
+        e2e_src_dir="${REPO_DIR}"
+    else
+        e2e_src_dir="${GOPATH}/src/${CSI_PROW_E2E_IMPORT_PATH}"
+    fi
+
+    case "$name" in
+        local)
+            ginkgo_target="${CSI_PROW_WORK}/e2e-local.test"
+            extra_args="-report-prefix=local"
+            cd "${GOPATH}/src/${CSI_PROW_SIDECAR_E2E_PATH}" || die "cd ${GOPATH}/src/${CSI_PROW_SIDECAR_E2E_PATH} failed"
+            ;;
+        vgs)
+            # VGS tests are in in-tree/core tests; do NOT pass -storage.testdriver
+            ginkgo_target="${CSI_PROW_WORK}/e2e.test"
+            cd "${e2e_src_dir}" || die "cd ${e2e_src_dir} failed"
+            ;;
+        *)
+            # Default: CSI external driver tests
+            ginkgo_target="${CSI_PROW_WORK}/e2e.test"
+            extra_args="-storage.testdriver=${CSI_PROW_WORK}/test-driver.yaml"
+            cd "${e2e_src_dir}" || die "cd ${e2e_src_dir} failed"
+            ;;
+    esac
+
+    [ -n "$extra_args" ] && args+=("$extra_args")
+    run_with_loggers env \
+        KUBECONFIG="$KUBECONFIG" \
+        KUBE_TEST_REPO_LIST="$(if [ -e "${CSI_PROW_WORK}/e2e-repo-list" ]; then echo "${CSI_PROW_WORK}/e2e-repo-list"; fi)" \
+        ginkgo --timeout="${CSI_PROW_GINKGO_TIMEOUT}" -v "$@" "$ginkgo_target" -- -report-dir "${ARTIFACTS}" "${args[@]}"
 )
 
 # Run csi-sanity against installed CSI driver.
@@ -1444,18 +1481,11 @@ main () {
                         ret=1
                     fi
 
-                    # Only add feature regex if groupsnapshot is not enabled
-                    if [ "${CSI_PROW_ENABLE_GROUP_SNAPSHOT}" = "true" ]; then
-                        combined_focus="${CSI_PROW_E2E_FOCUS}"
-                    else
-                        combined_focus="$focus.*($(regex_join "${CSI_PROW_E2E_FOCUS}"))"
-                    fi
-
                     # Run tests that are feature tagged, but non-alpha
                     # Ignore: Double quote to prevent globbing and word splitting.
                     # shellcheck disable=SC2086
                     if ! run_e2e parallel-features ${CSI_PROW_GINKGO_PARALLEL} \
-                         -focus="$combined_focus" \
+                         -focus="$focus.*($(regex_join "${CSI_PROW_E2E_FOCUS}"))" \
                          -skip="$(regex_join "${CSI_PROW_E2E_SERIAL}")"; then
                         warn "E2E parallel features failed"
                         ret=1
@@ -1479,6 +1509,18 @@ main () {
                         ret=1
                     fi
                 fi
+
+                # Run VGS in-tree tests only if enabled
+                if [ "${CSI_PROW_ENABLE_GROUP_SNAPSHOT}" = "true" ]; then
+                    vgs_focus="\[Feature:volumegroupsnapshot\]"
+                    if ! run_e2e vgs \
+                        -focus="${vgs_focus}" \
+                        -skip="$(regex_join "${CSI_PROW_E2E_SERIAL}" "${CSI_PROW_E2E_SKIP}")"; then
+                        warn "E2E VGS tests failed"
+                        ret=1
+                    fi
+                fi
+
             fi
             delete_cluster_inside_prow_job non-alpha
         fi
