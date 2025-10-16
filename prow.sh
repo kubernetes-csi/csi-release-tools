@@ -833,16 +833,7 @@ install_snapshot_crds() {
 #   $1: file path (optional) - if not provided, reads from stdin
 inject_vgs_feature_gate() {
   if [ "${CSI_PROW_ENABLE_GROUP_SNAPSHOT}" = "true" ]; then
-    awk '
-      BEGIN { inserted=0 }
-      {
-        print
-        if ($0 ~ /--leader-election=true/ && !inserted) {
-          print "            - \"--feature-gates=CSIVolumeGroupSnapshot=true\""
-          inserted=1
-        }
-      }
-    '
+    sed -E 's|^([[:space:]]*)# end snapshot controller args|\1- "--feature-gates=CSIVolumeGroupSnapshot=true"|'
   else
     cat  # just pass the file through unchanged
   fi
@@ -929,31 +920,20 @@ install_snapshot_controller() {
       # NOTE: This logic is similar to the logic here:
       # https://github.com/kubernetes-csi/csi-driver-host-path/blob/v1.4.0/deploy/util/deploy-hostpath.sh#L155
       modified="$(replace_snapshot_controller_image "$yaml" "local-build" "$NEW_TAG" | inject_vgs_feature_gate)"
-      diff <(echo "$yaml") <(echo "$modified")
-      if ! echo "$modified" | kubectl apply -f -; then
-          echo "modified version of ${SNAPSHOT_CONTROLLER_YAML}:"
-          echo "$modified"
-          exit 1
-      fi
   elif [ "${CSI_PROW_DRIVER_CANARY}" = "canary" ]; then
       echo "Deploying snapshot-controller from ${SNAPSHOT_CONTROLLER_YAML} with canary images."
       modified="$(replace_snapshot_controller_image "$yaml" "canary" "" "${CSI_PROW_DRIVER_CANARY_REGISTRY}" | inject_vgs_feature_gate)"
-      diff <(echo "$yaml") <(echo "$modified")
-      if ! echo "$modified" | kubectl apply -f -; then
-          echo "modified version of ${SNAPSHOT_CONTROLLER_YAML}:"
-          echo "$modified"
-          exit 1
-      fi
   else
       echo "kubectl apply -f $SNAPSHOT_CONTROLLER_YAML"
       # Replace snapshot-controller container tag to make it consistent with CSI_SNAPSHOTTER_VERSION
       modified="$(replace_snapshot_controller_image "$yaml" "default" | inject_vgs_feature_gate)"
-      diff <(echo "$yaml") <(echo "$modified")
-      if ! echo "$modified" | kubectl apply -f -; then
-          echo "modified version of ${SNAPSHOT_CONTROLLER_YAML}:"
-          echo "$modified"
-          exit 1
-      fi
+  fi
+
+  diff <(echo "$yaml") <(echo "$modified")
+  if ! echo "$modified" | kubectl apply -f -; then
+      echo "modified version of ${SNAPSHOT_CONTROLLER_YAML}:"
+      echo "$modified"
+      exit 1
   fi
 
   cnt=0
