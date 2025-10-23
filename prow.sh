@@ -780,6 +780,30 @@ install_csi_driver () {
         info "For container output see job artifacts."
         die "deploying the CSI driver with ${deploy_driver} failed"
     fi
+
+    if [ "${CSI_PROW_ENABLE_GROUP_SNAPSHOT}" = "true" ]; then
+        # Enable the groupSnapshot capability in test driver manifest
+        yq -i '.GroupSnapshotClass.FromName = true' "${CSI_PROW_WORK}/test-driver.yaml"
+        yq -i '.DriverInfo.Capabilities.groupSnapshot = true' "${CSI_PROW_WORK}/test-driver.yaml"
+        cat "${CSI_PROW_WORK}/test-driver.yaml"
+
+        # Make sure using consistent snapshotter image with snapshot-controller
+        DRIVER_SNAPSHOTTER_IMAGE="registry.k8s.io/sig-storage/csi-snapshotter:${CSI_SNAPSHOTTER_VERSION}"
+        kubectl get sts csi-hostpathplugin -n default -o yaml \
+        | yq "(.spec.template.spec.containers[] | select(.name == \"csi-snapshotter\") | .image) = \"${DRIVER_SNAPSHOTTER_IMAGE}\""  \
+        | kubectl apply -f -
+
+        # Enable the groupsnapshot feature gate for driver snapshotter
+        kubectl get sts csi-hostpathplugin -n default -o yaml \
+        | yq '(.spec.template.spec.containers[] | select(.name == "csi-snapshotter") | .args) += ["--feature-gates=CSIVolumeGroupSnapshot=true"]' \
+        | kubectl apply -f -
+
+        # Restart the StatefulSet
+        kubectl rollout restart sts csi-hostpathplugin -n default
+
+        # Wait for the rollout to complete
+        kubectl rollout status sts csi-hostpathplugin -n default
+    fi
 }
 
 # Installs all necessary snapshotter CRDs
@@ -1101,68 +1125,22 @@ run_e2e () (
     # the full Kubernetes E2E testsuite while only running a few tests.
     # shellcheck disable=SC2329
     move_junit () {
-        # shellcheck disable=SC2317
         if ls "${ARTIFACTS}"/junit_[0-9]*.xml 2>/dev/null >/dev/null; then
             mkdir -p "${ARTIFACTS}/junit/${name}" &&
-            mkdir -p "${ARTIFACTS}/junit/steps"
-
-            # Skip filter-junit for in-tree (VGS) runs, because k/k already produces clean JUnit
-            if [[ "${name}" == "vgs" ]]; then
-                echo "Skipping filter-junit for ${name} (in-tree tests already generate clean JUnit)"
+                mkdir -p "${ARTIFACTS}/junit/steps" &&
+                run_filter_junit -t="External.Storage|CSI.mock.volume" -o "${ARTIFACTS}/junit/steps/junit_${name}.xml" "${ARTIFACTS}"/junit_[0-9]*.xml &&
                 mv "${ARTIFACTS}"/junit_[0-9]*.xml "${ARTIFACTS}/junit/${name}/"
-            else
-                # Run filtering for CSI tests to remove duplicates/skipped cases
-                run_filter_junit -t="External.Storage|CSI.mock.volume" \
-                    -o "${ARTIFACTS}/junit/steps/junit_${name}.xml" \
-                    "${ARTIFACTS}"/junit_[0-9]*.xml &&
-                mv "${ARTIFACTS}"/junit_[0-9]*.xml "${ARTIFACTS}/junit/${name}/"
-            fi
         fi
     }
     trap move_junit EXIT
 
-    
-    # Only set up move_junit for non-VGS tests
-    if [ "$name" != "vgs" ]; then
-        trap move_junit EXIT
-    fi
-
-    # Determine ginkgo target and options
-    local ginkgo_target=""
-    local extra_args=""
-    local e2e_src_dir=""
-    local args=()
-
-    if [[ $(basename "${REPO_DIR}") == "kubernetes" ]]; then
-        e2e_src_dir="${REPO_DIR}"
+    if [ "${name}" == "local" ]; then
+        cd "${GOPATH}/src/${CSI_PROW_SIDECAR_E2E_PATH}" &&
+        run_with_loggers env KUBECONFIG="$KUBECONFIG" KUBE_TEST_REPO_LIST="$(if [ -e "${CSI_PROW_WORK}/e2e-repo-list" ]; then echo "${CSI_PROW_WORK}/e2e-repo-list"; fi)" ginkgo --timeout="${CSI_PROW_GINKGO_TIMEOUT}" -v "$@" "${CSI_PROW_WORK}/e2e-local.test" -- -report-dir "${ARTIFACTS}" -report-prefix local
     else
-        e2e_src_dir="${GOPATH}/src/${CSI_PROW_E2E_IMPORT_PATH}"
+        cd "${GOPATH}/src/${CSI_PROW_E2E_IMPORT_PATH}" &&
+        run_with_loggers env KUBECONFIG="$KUBECONFIG" KUBE_TEST_REPO_LIST="$(if [ -e "${CSI_PROW_WORK}/e2e-repo-list" ]; then echo "${CSI_PROW_WORK}/e2e-repo-list"; fi)" ginkgo --timeout="${CSI_PROW_GINKGO_TIMEOUT}" -v "$@" "${CSI_PROW_WORK}/e2e.test" -- -report-dir "${ARTIFACTS}" -storage.testdriver="${CSI_PROW_WORK}/test-driver.yaml"
     fi
-
-    case "$name" in
-        local)
-            ginkgo_target="${CSI_PROW_WORK}/e2e-local.test"
-            extra_args="-report-prefix=local"
-            cd "${GOPATH}/src/${CSI_PROW_SIDECAR_E2E_PATH}" || die "cd ${GOPATH}/src/${CSI_PROW_SIDECAR_E2E_PATH} failed"
-            ;;
-        vgs)
-            # VGS tests are in in-tree/core tests; do NOT pass -storage.testdriver
-            ginkgo_target="${CSI_PROW_WORK}/e2e.test"
-            cd "${e2e_src_dir}" || die "cd ${e2e_src_dir} failed"
-            ;;
-        *)
-            # Default: CSI external driver tests
-            ginkgo_target="${CSI_PROW_WORK}/e2e.test"
-            extra_args="-storage.testdriver=${CSI_PROW_WORK}/test-driver.yaml"
-            cd "${e2e_src_dir}" || die "cd ${e2e_src_dir} failed"
-            ;;
-    esac
-
-    [ -n "$extra_args" ] && args+=("$extra_args")
-    run_with_loggers env \
-        KUBECONFIG="$KUBECONFIG" \
-        KUBE_TEST_REPO_LIST="$(if [ -e "${CSI_PROW_WORK}/e2e-repo-list" ]; then echo "${CSI_PROW_WORK}/e2e-repo-list"; fi)" \
-        ginkgo --timeout="${CSI_PROW_GINKGO_TIMEOUT}" -v "$@" "$ginkgo_target" -- -report-dir "${ARTIFACTS}" "${args[@]}"
 )
 
 # Run csi-sanity against installed CSI driver.
@@ -1356,12 +1334,31 @@ function version_gt() {
     test "$(printf '%s' "$versions" | sort -V | head -n 1)" != "$greaterVersion"
 }
 
+install_yq_if_missing() {
+  local version="${1:-v4.48.1}"
+  local yq_path="/usr/local/bin/yq"
+  if ! command -v yq &>/dev/null; then
+    echo "Installing yq ${version}..."
+    if ! curl -fsSL -o "${yq_path}" "https://github.com/mikefarah/yq/releases/download/${version}/yq_linux_amd64"; then
+      echo "Failed to download yq" >&2
+      exit 1
+    fi
+    chmod +x "${yq_path}"
+    echo "yq ${version} installed at ${yq_path}"
+  else
+    echo "yq found, skipping install"
+  fi
+}
+
 main () {
     local images ret
     ret=0
 
     # Set up work directory.
     ensure_paths
+
+    # Install yq
+    install_yq_if_missing
 
     images=
     if ${CSI_PROW_BUILD_JOB}; then
@@ -1489,18 +1486,6 @@ main () {
                         ret=1
                     fi
                 fi
-
-                # Run VGS in-tree tests only if enabled
-                if [ "${CSI_PROW_ENABLE_GROUP_SNAPSHOT}" = "true" ]; then
-                    vgs_focus="\[Feature:volumegroupsnapshot\]"
-                    if ! run_e2e vgs \
-                        -focus="${vgs_focus}" \
-                        -skip="$(regex_join "${CSI_PROW_E2E_SERIAL}" "${CSI_PROW_E2E_SKIP}")"; then
-                        warn "E2E VGS tests failed"
-                        ret=1
-                    fi
-                fi
-
             fi
             delete_cluster_inside_prow_job non-alpha
         fi
