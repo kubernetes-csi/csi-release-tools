@@ -1333,7 +1333,7 @@ function version_gt() {
     greaterVersion=${greaterVersion#"v"};
     test "$(printf '%s' "$versions" | sort -V | head -n 1)" != "$greaterVersion"
 }
-
+# shellcheck disable=SC2120
 install_yq_if_missing() {
   local version="${1:-v4.48.1}"
   local yq_path="/usr/local/bin/yq"
@@ -1358,6 +1358,7 @@ main () {
     ensure_paths
 
     # Install yq
+    # shellcheck disable=SC2119
     install_yq_if_missing
 
     images=
