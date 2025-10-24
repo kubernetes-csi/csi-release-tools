@@ -210,6 +210,12 @@ configvar CSI_PROW_DEPLOYMENT_SUFFIX "" "additional suffix in kubernetes-x.yy[su
 # a .prow.sh file and this config variable can be overridden.
 configvar CSI_PROW_DRIVER_INSTALL "install_csi_driver" "name of the shell function which installs the CSI driver"
 
+# Optional post-install hook(s) that run after the CSI driver is successfully installed.
+# This allows sidecars to customize the test environment (e.g., modify test-driver.yaml).
+# Can be a single function name or a space-separated list of function names.
+# Set to empty string to disable.
+configvar CSI_PROW_DRIVER_POSTINSTALL "" "name(s) of shell function(s) which get called after CSI driver is installed"
+
 # If CSI_PROW_DRIVER_CANARY is set (typically to "canary", but also
 # version tag. Usually empty. CSI_PROW_HOSTPATH_CANARY is
 # accepted as alternative name because some test-infra jobs
@@ -781,29 +787,66 @@ install_csi_driver () {
         die "deploying the CSI driver with ${deploy_driver} failed"
     fi
 
-    if [ "${CSI_PROW_ENABLE_GROUP_SNAPSHOT}" = "true" ]; then
-        # Enable the groupSnapshot capability in test driver manifest
-        yq -i '.GroupSnapshotClass.FromName = true' "${CSI_PROW_WORK}/test-driver.yaml"
-        yq -i '.DriverInfo.Capabilities.groupSnapshot = true' "${CSI_PROW_WORK}/test-driver.yaml"
-        cat "${CSI_PROW_WORK}/test-driver.yaml"
+    # Call post-install hook(s) if defined
+    if [ -n "${CSI_PROW_DRIVER_POSTINSTALL}" ]; then
+        # Iterate through space-separated list of hook functions
+        for hook_func in ${CSI_PROW_DRIVER_POSTINSTALL}; do
+            info "Running post-install hook: ${hook_func}"
+            # Check the function exists before calling it
+            if ! declare -f "${hook_func}" >/dev/null; then
+                die "post-install hook function '${hook_func}' is not defined"
+            fi
+            if ! "${hook_func}"; then
+                die "post-install hook ${hook_func} failed"
+            fi
+        done
+    fi
+}
 
-        # Make sure using consistent snapshotter image with snapshot-controller
-        DRIVER_SNAPSHOTTER_IMAGE="registry.k8s.io/sig-storage/csi-snapshotter:${CSI_SNAPSHOTTER_VERSION}"
-        kubectl get sts csi-hostpathplugin -n default -o yaml \
+# Post-install hook for enabling VolumeGroupSnapshot support.
+# This function configures the test driver and CSI driver deployment
+# to support VolumeGroupSnapshot functionality.
+#
+# This can be used as an example post-install hook by setting:
+#   export CSI_PROW_DRIVER_POSTINSTALL="vgs_post_install"
+vgs_post_install () {
+    if [ "${CSI_PROW_ENABLE_GROUP_SNAPSHOT}" != "true" ]; then
+        warn "Skipping VGS post-install: CSI_PROW_ENABLE_GROUP_SNAPSHOT is not enabled"
+        return 0
+    fi
+
+    info "Configuring VolumeGroupSnapshot support..."
+
+    # Enable the groupSnapshot capability in test driver manifest
+    info "Updating test-driver.yaml with VGS capabilities"
+    yq -i '.GroupSnapshotClass.FromName = true' "${CSI_PROW_WORK}/test-driver.yaml"
+    yq -i '.DriverInfo.Capabilities.groupSnapshot = true' "${CSI_PROW_WORK}/test-driver.yaml"
+
+    info "Test driver configuration:"
+    cat "${CSI_PROW_WORK}/test-driver.yaml"
+
+    # Make sure using consistent snapshotter image with snapshot-controller
+    info "Updating csi-snapshotter image to ${CSI_SNAPSHOTTER_VERSION}"
+    DRIVER_SNAPSHOTTER_IMAGE="registry.k8s.io/sig-storage/csi-snapshotter:${CSI_SNAPSHOTTER_VERSION}"
+    kubectl get sts csi-hostpathplugin -n default -o yaml \
         | yq "(.spec.template.spec.containers[] | select(.name == \"csi-snapshotter\") | .image) = \"${DRIVER_SNAPSHOTTER_IMAGE}\""  \
         | kubectl apply -f -
 
-        # Enable the groupsnapshot feature gate for driver snapshotter
-        kubectl get sts csi-hostpathplugin -n default -o yaml \
+    # Enable the groupsnapshot feature gate for driver snapshotter
+    info "Enabling CSIVolumeGroupSnapshot feature gate"
+    kubectl get sts csi-hostpathplugin -n default -o yaml \
         | yq '(.spec.template.spec.containers[] | select(.name == "csi-snapshotter") | .args) += ["--feature-gates=CSIVolumeGroupSnapshot=true"]' \
         | kubectl apply -f -
 
-        # Restart the StatefulSet
-        kubectl rollout restart sts csi-hostpathplugin -n default
+    # Restart the StatefulSet
+    info "Restarting StatefulSet to apply changes"
+    kubectl rollout restart sts csi-hostpathplugin -n default
 
-        # Wait for the rollout to complete
-        kubectl rollout status sts csi-hostpathplugin -n default
-    fi
+    # Wait for the rollout to complete
+    info "Waiting for rollout to complete..."
+    kubectl rollout status sts csi-hostpathplugin -n default
+
+    info "VolumeGroupSnapshot configuration completed successfully"
 }
 
 # Installs all necessary snapshotter CRDs
@@ -1125,6 +1168,7 @@ run_e2e () (
     # the full Kubernetes E2E testsuite while only running a few tests.
     # shellcheck disable=SC2329
     move_junit () {
+        # shellcheck disable=SC2317
         if ls "${ARTIFACTS}"/junit_[0-9]*.xml 2>/dev/null >/dev/null; then
             mkdir -p "${ARTIFACTS}/junit/${name}" &&
                 mkdir -p "${ARTIFACTS}/junit/steps" &&
@@ -1336,7 +1380,7 @@ function version_gt() {
 # shellcheck disable=SC2120
 install_yq_if_missing() {
   local version="${1:-v4.48.1}"
-  local yq_path="/usr/local/bin/yq"
+  local yq_path="${CSI_PROW_BIN}/yq"
   if ! command -v yq &>/dev/null; then
     echo "Installing yq ${version}..."
     if ! curl -fsSL -o "${yq_path}" "https://github.com/mikefarah/yq/releases/download/${version}/yq_linux_amd64"; then
