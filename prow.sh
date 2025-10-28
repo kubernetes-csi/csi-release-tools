@@ -210,11 +210,11 @@ configvar CSI_PROW_DEPLOYMENT_SUFFIX "" "additional suffix in kubernetes-x.yy[su
 # a .prow.sh file and this config variable can be overridden.
 configvar CSI_PROW_DRIVER_INSTALL "install_csi_driver" "name of the shell function which installs the CSI driver"
 
-# Optional post-install hook(s) that run after the CSI driver is successfully installed.
+# Optional post-install hook that runs after the CSI driver is successfully installed.
 # This allows sidecars to customize the test environment (e.g., modify test-driver.yaml).
-# Can be a single function name or a space-separated list of function names.
+# Should be a single function name.
 # Set to empty string to disable.
-configvar CSI_PROW_DRIVER_POSTINSTALL "" "name(s) of shell function(s) which get called after CSI driver is installed"
+configvar CSI_PROW_DRIVER_POSTINSTALL "" "name of shell function which gets called after CSI driver is installed"
 
 # If CSI_PROW_DRIVER_CANARY is set (typically to "canary", but also
 # version tag. Usually empty. CSI_PROW_HOSTPATH_CANARY is
@@ -787,19 +787,16 @@ install_csi_driver () {
         die "deploying the CSI driver with ${deploy_driver} failed"
     fi
 
-    # Call post-install hook(s) if defined
+    # Call post-install hook if defined
     if [ -n "${CSI_PROW_DRIVER_POSTINSTALL}" ]; then
-        # Iterate through space-separated list of hook functions
-        for hook_func in ${CSI_PROW_DRIVER_POSTINSTALL}; do
-            info "Running post-install hook: ${hook_func}"
-            # Check the function exists before calling it
-            if ! declare -f "${hook_func}" >/dev/null; then
-                die "post-install hook function '${hook_func}' is not defined"
-            fi
-            if ! "${hook_func}"; then
-                die "post-install hook ${hook_func} failed"
-            fi
-        done
+        info "Running post-install hook: ${CSI_PROW_DRIVER_POSTINSTALL}"
+        # Check the function exists before calling it
+        if ! declare -f "${CSI_PROW_DRIVER_POSTINSTALL}" >/dev/null; then
+            die "post-install hook function '${CSI_PROW_DRIVER_POSTINSTALL}' is not defined"
+        fi
+        if ! "${CSI_PROW_DRIVER_POSTINSTALL}"; then
+            die "post-install hook ${CSI_PROW_DRIVER_POSTINSTALL} failed"
+        fi
     fi
 }
 
