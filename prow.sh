@@ -140,8 +140,8 @@ csi_prow_kubernetes_version_suffix="$(echo "${CSI_PROW_KUBERNETES_VERSION}" | tr
 # for that, otherwise the latest stable release for which we then
 # list the officially supported images below.
 kind_version_default () {
-    case "${CSI_PROW_KUBERNETES_VERSION}" in
-        latest|master)
+    case "${CSI_PROW_KUBERNETES_VERSION},$(basename "${REPO_DIR}")" in
+        latest,*|master,*|*,kubernetes)
             echo main;;
         *)
             echo v0.30.0;;
@@ -206,6 +206,12 @@ configvar CSI_PROW_DEPLOYMENT_SUFFIX "" "additional suffix in kubernetes-x.yy[su
 # If they don't, then a different install function can be provided in
 # a .prow.sh file and this config variable can be overridden.
 configvar CSI_PROW_DRIVER_INSTALL "install_csi_driver" "name of the shell function which installs the CSI driver"
+
+# Optional post-install hook that runs after the CSI driver is successfully installed.
+# This allows sidecars to customize the test environment (e.g., modify test-driver.yaml).
+# Should be a single function name.
+# Set to empty string to disable.
+configvar CSI_PROW_DRIVER_POSTINSTALL "" "name of shell function which gets called after CSI driver is installed"
 
 # If CSI_PROW_DRIVER_CANARY is set (typically to "canary", but also
 # version tag. Usually empty. CSI_PROW_HOSTPATH_CANARY is
@@ -377,6 +383,9 @@ default_csi_snapshotter_version () {
 	fi
 }
 configvar CSI_SNAPSHOTTER_VERSION "$(default_csi_snapshotter_version)" "external-snapshotter version tag"
+
+# Enable installing VolumeGroupSnapshot CRDs (off by default, can be set to true in prow jobs)
+configvar CSI_PROW_ENABLE_GROUP_SNAPSHOT "false" "Enable the VolumeGroupSnapshot tests"
 
 # Some tests are known to be unusable in a KinD cluster. For example,
 # stopping kubelet with "ssh <node IP> systemctl stop kubelet" simply
@@ -614,19 +623,29 @@ start_cluster () {
     if ! [ "$image" ]; then
         if ! ${csi_prow_kind_have_kubernetes}; then
             local version="${CSI_PROW_KUBERNETES_VERSION}"
-            if [ "$version" = "latest" ]; then
-                version=master
+            # Detect if running inside k/k repo
+            if [[ $(basename "${REPO_DIR}") == "kubernetes" ]]; then
+                echo "Using Kubernetes source from CI checkout ..."
+                ksrc="${REPO_DIR}"
+                version="$(git -C "$ksrc" rev-parse HEAD)"
+            else
+                echo "Cloning Kubernetes..."
+                [ "$version" = "latest" ] && version=master
+                ksrc="${CSI_PROW_WORK}/src/kubernetes"
+                git_clone https://github.com/kubernetes/kubernetes "$ksrc" "$(version_to_git "$version")" \
+                    || die "checking out Kubernetes $version failed"
             fi
-            git_clone https://github.com/kubernetes/kubernetes "${CSI_PROW_WORK}/src/kubernetes" "$(version_to_git "$version")" || die "checking out Kubernetes $version failed"
 
-            go_version="$(go_version_for_kubernetes "${CSI_PROW_WORK}/src/kubernetes" "$version")" || die "cannot proceed without knowing Go version for Kubernetes"
+
+            go_version="$(go_version_for_kubernetes "$ksrc" "$version")" || die "cannot proceed without knowing Go version for Kubernetes"
             # Changing into the Kubernetes source code directory is a workaround for https://github.com/kubernetes-sigs/kind/issues/1910
             # shellcheck disable=SC2046
-            (cd "${CSI_PROW_WORK}/src/kubernetes" && run_with_go "$go_version" kind build node-image "${CSI_PROW_WORK}/src/kubernetes" --image csiprow/node:latest) || die "'kind build node-image' failed"
+            (cd "$ksrc" && run_with_go "$go_version" kind build node-image "$ksrc" --image csiprow/node:latest) || die "'kind build node-image' failed"
             csi_prow_kind_have_kubernetes=true
         fi
         image="csiprow/node:latest"
     fi
+
     cat >"${CSI_PROW_WORK}/kind-config.yaml" <<EOF
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
@@ -764,6 +783,64 @@ install_csi_driver () {
         info "For container output see job artifacts."
         die "deploying the CSI driver with ${deploy_driver} failed"
     fi
+
+    # Call post-install hook if defined
+    if [ -n "${CSI_PROW_DRIVER_POSTINSTALL}" ]; then
+        info "Running post-install hook: ${CSI_PROW_DRIVER_POSTINSTALL}"
+        # Check the function exists before calling it
+        if ! declare -f "${CSI_PROW_DRIVER_POSTINSTALL}" >/dev/null; then
+            die "post-install hook function '${CSI_PROW_DRIVER_POSTINSTALL}' is not defined"
+        fi
+        if ! "${CSI_PROW_DRIVER_POSTINSTALL}"; then
+            die "post-install hook ${CSI_PROW_DRIVER_POSTINSTALL} failed"
+        fi
+    fi
+}
+
+# Post-install hook for enabling VolumeGroupSnapshot support.
+# This function configures the test driver and CSI driver deployment
+# to support VolumeGroupSnapshot functionality.
+#
+# This can be used as an example post-install hook by setting:
+#   export CSI_PROW_DRIVER_POSTINSTALL="vgs_post_install"
+vgs_post_install () {
+    if [ "${CSI_PROW_ENABLE_GROUP_SNAPSHOT}" != "true" ]; then
+        warn "Skipping VGS post-install: CSI_PROW_ENABLE_GROUP_SNAPSHOT is not enabled"
+        return 0
+    fi
+
+    info "Configuring VolumeGroupSnapshot support..."
+
+    # Enable the groupSnapshot capability in test driver manifest
+    info "Updating test-driver.yaml with VGS capabilities"
+    yq -i '.GroupSnapshotClass.FromName = true' "${CSI_PROW_WORK}/test-driver.yaml"
+    yq -i '.DriverInfo.Capabilities.groupSnapshot = true' "${CSI_PROW_WORK}/test-driver.yaml"
+
+    info "Test driver configuration:"
+    cat "${CSI_PROW_WORK}/test-driver.yaml"
+
+    # Make sure using consistent snapshotter image with snapshot-controller
+    info "Updating csi-snapshotter image to ${CSI_SNAPSHOTTER_VERSION}"
+    DRIVER_SNAPSHOTTER_IMAGE="registry.k8s.io/sig-storage/csi-snapshotter:${CSI_SNAPSHOTTER_VERSION}"
+    kubectl get sts csi-hostpathplugin -n default -o yaml \
+        | yq "(.spec.template.spec.containers[] | select(.name == \"csi-snapshotter\") | .image) = \"${DRIVER_SNAPSHOTTER_IMAGE}\""  \
+        | kubectl apply -f -
+
+    # Enable the groupsnapshot feature gate for driver snapshotter
+    info "Enabling CSIVolumeGroupSnapshot feature gate"
+    kubectl get sts csi-hostpathplugin -n default -o yaml \
+        | yq '(.spec.template.spec.containers[] | select(.name == "csi-snapshotter") | .args) += ["--feature-gates=CSIVolumeGroupSnapshot=true"]' \
+        | kubectl apply -f -
+
+    # Restart the StatefulSet
+    info "Restarting StatefulSet to apply changes"
+    kubectl rollout restart sts csi-hostpathplugin -n default
+
+    # Wait for the rollout to complete
+    info "Waiting for rollout to complete..."
+    kubectl rollout status sts csi-hostpathplugin -n default
+
+    info "VolumeGroupSnapshot configuration completed successfully"
 }
 
 # Installs all necessary snapshotter CRDs
@@ -789,6 +866,73 @@ install_snapshot_crds() {
 	cnt=$((cnt + 1))
     sleep 2
   done
+     
+  if ${CSI_PROW_ENABLE_GROUP_SNAPSHOT}; then
+    echo "Installing VolumeGroupSnapshot CRDs from ${CRD_BASE_DIR}"
+    kubectl apply -f "${CRD_BASE_DIR}/groupsnapshot.storage.k8s.io_volumegroupsnapshotclasses.yaml" --validate=false
+    kubectl apply -f "${CRD_BASE_DIR}/groupsnapshot.storage.k8s.io_volumegroupsnapshotcontents.yaml" --validate=false
+    kubectl apply -f "${CRD_BASE_DIR}/groupsnapshot.storage.k8s.io_volumegroupsnapshots.yaml" --validate=false
+
+    local cnt=0
+    until kubectl get volumegroupsnapshotclasses.groupsnapshot.storage.k8s.io \
+        && kubectl get volumegroupsnapshots.groupsnapshot.storage.k8s.io \
+        && kubectl get volumegroupsnapshotcontents.groupsnapshot.storage.k8s.io; do
+        if [ $cnt -gt 30 ]; then
+        echo >&2 "ERROR: VolumeGroupSnapshot CRDs not ready after 60s"
+        exit 1
+        fi
+        echo "$(date +%H:%M:%S)" "waiting for VolumeGroupSnapshot CRDs, attempt #$cnt"
+        cnt=$((cnt + 1))
+        sleep 2
+    done
+    echo "VolumeGroupSnapshot CRDs installed and ready"
+  fi
+}
+
+# Inject the CSIVolumeGroupSnapshot feature-gate for snapshot controller
+# Arguments:
+#   $1: file path (optional) - if not provided, reads from stdin
+inject_vgs_feature_gate() {
+  if [ "${CSI_PROW_ENABLE_GROUP_SNAPSHOT}" = "true" ]; then
+    sed -E 's|^([[:space:]]*)# end snapshot controller args|\1- "--feature-gates=CSIVolumeGroupSnapshot=true"|'
+  else
+    cat  # just pass the file through unchanged
+  fi
+}
+
+# Replace the snapshot controller image based on the test mode
+# Arguments:
+#   $1: yaml content
+#   $2: mode ("local-build", "canary", or "default")
+#   $3: new_tag (for local-build mode)
+#   $4: registry (for canary mode)
+replace_snapshot_controller_image() {
+    local yaml="$1"
+    local mode="$2"
+    local new_tag="${3:-}"
+    local registry="${4:-}"
+
+    case "$mode" in
+        local-build)
+            # Replace with snapshot-controller:new_tag
+            echo "$yaml" | sed -E \
+                "s|^([[:space:]]*image: )(.*snapshot-controller):[^[:space:]]*|\1snapshot-controller:${new_tag}|"
+            ;;
+        canary)
+            # Replace with registry/snapshot-controller:canary
+            echo "$yaml" | sed -E \
+                "s|^([[:space:]]*image: ).*/([^/:]+):[^[:space:]]*|\1${registry}/\2:canary|"
+            ;;
+        default)
+            # Replace only the snapshot-controller container tag with CSI_SNAPSHOTTER_VERSION
+            echo "$yaml" | sed -E \
+                "s|^([[:space:]]*image: .*/[^:]+):[^[:space:]]*|\1:${CSI_SNAPSHOTTER_VERSION}|"
+            ;;
+        *)
+            echo "Error: Unknown mode '$mode' for replace_controller_image" >&2
+            echo "$yaml"
+            ;;
+    esac
 }
 
 # Install snapshot controller and associated RBAC, retrying until the pod is running.
@@ -817,6 +961,12 @@ install_snapshot_controller() {
   done
 
   SNAPSHOT_CONTROLLER_YAML="${CONTROLLER_DIR}/deploy/kubernetes/snapshot-controller/setup-snapshot-controller.yaml"
+  if [[ "$SNAPSHOT_CONTROLLER_YAML" =~ ^https?:// ]]; then
+      yaml="$(curl -sL "$SNAPSHOT_CONTROLLER_YAML")"
+  else
+      yaml="$(cat "$SNAPSHOT_CONTROLLER_YAML")"
+  fi
+
   if [[ ${REPO_DIR} == *"external-snapshotter"* ]]; then
       # snapshot-controller image built from the PR will get a "csiprow" tag.
       # Load it into the "kind" cluster so that we can deploy it.
@@ -830,55 +980,21 @@ install_snapshot_controller() {
       # Replace image in SNAPSHOT_CONTROLLER_YAML with snapshot-controller:csiprow and deploy
       # NOTE: This logic is similar to the logic here:
       # https://github.com/kubernetes-csi/csi-driver-host-path/blob/v1.4.0/deploy/util/deploy-hostpath.sh#L155
-      # Ignore: Double quote to prevent globbing and word splitting.
-      # shellcheck disable=SC2086
-      # Ignore: Use find instead of ls to better handle non-alphanumeric filenames.
-      # shellcheck disable=SC2012
-      for i in $(ls ${SNAPSHOT_CONTROLLER_YAML} | sort); do
-          echo "   $i"
-          # Ignore: Useless cat. Consider 'cmd < file | ..' or 'cmd file | ..' instead.
-          # shellcheck disable=SC2002
-          # Ignore: See if you can use ${variable//search/replace} instead.
-          # shellcheck disable=SC2001
-          modified="$(cat "$i" | while IFS= read -r line; do
-              nocomments="$(echo "$line" | sed -e 's/ *#.*$//')"
-              if echo "$nocomments" | grep -q '^[[:space:]]*image:[[:space:]]*'; then
-                  # Split 'image: registry.k8s.io/sig-storage/snapshot-controller:v3.0.0'
-                  # into image (snapshot-controller:v3.0.0),
-                  # name (snapshot-controller),
-                  # tag (v3.0.0).
-                  image=$(echo "$nocomments" | sed -e 's;.*image:[[:space:]]*;;')
-                  name=$(echo "$image" | sed -e 's;.*/\([^:]*\).*;\1;')
-                  tag=$(echo "$image" | sed -e 's;.*:;;')
-
-                  # Now replace registry and/or tag
-                  NEW_TAG="csiprow"
-                  line="$(echo "$nocomments" | sed -e "s;$image;${name}:${NEW_TAG};")"
-	          echo "        using $line" >&2
-              fi
-              echo "$line"
-          done)"
-          if ! echo "$modified" | kubectl apply -f -; then
-              echo "modified version of $i:"
-              echo "$modified"
-              exit 1
-          fi
-      done
+      modified="$(replace_snapshot_controller_image "$yaml" "local-build" "$NEW_TAG" | inject_vgs_feature_gate)"
   elif [ "${CSI_PROW_DRIVER_CANARY}" = "canary" ]; then
       echo "Deploying snapshot-controller from ${SNAPSHOT_CONTROLLER_YAML} with canary images."
-      yaml="$(kubectl apply --dry-run=client -o yaml -f "$SNAPSHOT_CONTROLLER_YAML")"
-      # Ignore: See if you can use ${variable//search/replace} instead.
-      # shellcheck disable=SC2001
-      modified="$(echo "$yaml" | sed -e "s;image: .*/\([^/:]*\):.*;image: ${CSI_PROW_DRIVER_CANARY_REGISTRY}/\1:canary;")"
-      diff <(echo "$yaml") <(echo "$modified")
-      if ! echo "$modified" | kubectl apply -f -; then
-          echo "modified version of $SNAPSHOT_CONTROLLER_YAML:"
-          echo "$modified"
-          exit 1
-      fi
+      modified="$(replace_snapshot_controller_image "$yaml" "canary" "" "${CSI_PROW_DRIVER_CANARY_REGISTRY}" | inject_vgs_feature_gate)"
   else
       echo "kubectl apply -f $SNAPSHOT_CONTROLLER_YAML"
-      kubectl apply -f "$SNAPSHOT_CONTROLLER_YAML"
+      # Replace snapshot-controller container tag to make it consistent with CSI_SNAPSHOTTER_VERSION
+      modified="$(replace_snapshot_controller_image "$yaml" "default" | inject_vgs_feature_gate)"
+  fi
+
+  diff <(echo "$yaml") <(echo "$modified")
+  if ! echo "$modified" | kubectl apply -f -; then
+      echo "modified version of ${SNAPSHOT_CONTROLLER_YAML}:"
+      echo "$modified"
+      exit 1
   fi
 
   cnt=0
@@ -977,14 +1093,24 @@ install_e2e () {
     if sidecar_tests_enabled; then
         run_with_go "${CSI_PROW_GO_VERSION_BUILD}" go test -c -o "${CSI_PROW_WORK}/e2e-local.test" "${CSI_PROW_SIDECAR_E2E_IMPORT_PATH}"
     fi
-    git_checkout "${CSI_PROW_E2E_REPO}" "${GOPATH}/src/${CSI_PROW_E2E_IMPORT_PATH}" "${CSI_PROW_E2E_VERSION}" --depth=1 &&
+
+    local e2e_src_dir 
+    # In kubernetes presubmit do not need clone the src
+    if [[ $(basename "${REPO_DIR}") == "kubernetes" ]]; then
+        echo "Using existing repo at ${REPO_DIR}"
+        e2e_src_dir="${REPO_DIR}"
+    else
+        git_checkout "${CSI_PROW_E2E_REPO}" "${GOPATH}/src/${CSI_PROW_E2E_IMPORT_PATH}" "${CSI_PROW_E2E_VERSION}" --depth=1
+        e2e_src_dir="${GOPATH}/src/${CSI_PROW_E2E_IMPORT_PATH}"
+    fi
+
     if [ "${CSI_PROW_E2E_IMPORT_PATH}" = "k8s.io/kubernetes" ]; then
         patch_kubernetes "${GOPATH}/src/${CSI_PROW_E2E_IMPORT_PATH}" "${CSI_PROW_WORK}" &&
-        go_version="${CSI_PROW_GO_VERSION_E2E:-$(go_version_for_kubernetes "${GOPATH}/src/${CSI_PROW_E2E_IMPORT_PATH}" "${CSI_PROW_E2E_VERSION}")}" &&
-        run_with_go "$go_version" make WHAT=test/e2e/e2e.test "-C${GOPATH}/src/${CSI_PROW_E2E_IMPORT_PATH}" &&
-        ln -s "${GOPATH}/src/${CSI_PROW_E2E_IMPORT_PATH}/_output/bin/e2e.test" "${CSI_PROW_WORK}" &&
-        run_with_go "$go_version" make WHAT=vendor/github.com/onsi/ginkgo/ginkgo "-C${GOPATH}/src/${CSI_PROW_E2E_IMPORT_PATH}" &&
-        ln -s "${GOPATH}/src/${CSI_PROW_E2E_IMPORT_PATH}/_output/bin/ginkgo" "${CSI_PROW_BIN}"
+        go_version="${CSI_PROW_GO_VERSION_E2E:-$(go_version_for_kubernetes "${e2e_src_dir}" "${CSI_PROW_E2E_VERSION}")}" &&
+        run_with_go "$go_version" make WHAT=test/e2e/e2e.test "-C${e2e_src_dir}" &&
+        ln -s "${e2e_src_dir}/_output/bin/e2e.test" "${CSI_PROW_WORK}" &&
+        run_with_go "$go_version" make WHAT=vendor/github.com/onsi/ginkgo/ginkgo "-C${e2e_src_dir}" &&
+        ln -s "${e2e_src_dir}/_output/bin/ginkgo" "${CSI_PROW_BIN}"
     else
         run_with_go "${CSI_PROW_GO_VERSION_E2E}" go test -c -o "${CSI_PROW_WORK}/e2e.test" "${CSI_PROW_E2E_IMPORT_PATH}/test/e2e"
     fi
@@ -1011,7 +1137,16 @@ run_with_loggers () (
 
 # Invokes the filter-junit.go tool.
 run_filter_junit () {
-    run_with_go "${CSI_PROW_GO_VERSION_BUILD}" go run "${RELEASE_TOOLS_ROOT}/filter-junit.go" "$@"
+    local go_version ksrc version
+    go_version="${CSI_PROW_GO_VERSION_BUILD}"
+    # Detect if running inside k/k repo
+    if [[ $(basename "${REPO_DIR}") == "kubernetes" ]]; then
+        echo "Using Kubernetes source from CI checkout ..."
+        ksrc="${REPO_DIR}"
+        version="$(git -C "$ksrc" rev-parse HEAD)"
+        go_version="$(go_version_for_kubernetes "$ksrc" "$version")" || die "cannot proceed without knowing Go version for run_filter_junit"
+    fi
+    run_with_go "${go_version}" go run "${RELEASE_TOOLS_ROOT}/filter-junit.go" "$@"
 }
 
 # Runs the E2E test suite in a sub-shell.
@@ -1025,7 +1160,9 @@ run_e2e () (
     # Rename, merge and filter JUnit files. Necessary in case that we run the E2E suite again
     # and to avoid the large number of "skipped" tests that we get from using
     # the full Kubernetes E2E testsuite while only running a few tests.
+    # shellcheck disable=SC2329
     move_junit () {
+        # shellcheck disable=SC2317
         if ls "${ARTIFACTS}"/junit_[0-9]*.xml 2>/dev/null >/dev/null; then
             mkdir -p "${ARTIFACTS}/junit/${name}" &&
                 mkdir -p "${ARTIFACTS}/junit/steps" &&
@@ -1234,6 +1371,22 @@ function version_gt() {
     greaterVersion=${greaterVersion#"v"};
     test "$(printf '%s' "$versions" | sort -V | head -n 1)" != "$greaterVersion"
 }
+# shellcheck disable=SC2120
+install_yq_if_missing() {
+  local version="${1:-v4.48.1}"
+  local yq_path="${CSI_PROW_BIN}/yq"
+  if ! command -v yq &>/dev/null; then
+    echo "Installing yq ${version}..."
+    if ! curl -fsSL -o "${yq_path}" "https://github.com/mikefarah/yq/releases/download/${version}/yq_linux_amd64"; then
+      echo "Failed to download yq" >&2
+      exit 1
+    fi
+    chmod +x "${yq_path}"
+    echo "yq ${version} installed at ${yq_path}"
+  else
+    echo "yq found, skipping install"
+  fi
+}
 
 main () {
     local images ret
@@ -1242,10 +1395,17 @@ main () {
     # Set up work directory.
     ensure_paths
 
+    # Install yq
+    # shellcheck disable=SC2119
+    install_yq_if_missing
+
     images=
     if ${CSI_PROW_BUILD_JOB}; then
         # A successful build is required for testing.
-        run_with_go "${CSI_PROW_GO_VERSION_BUILD}" make all "GOFLAGS_VENDOR=${GOFLAGS_VENDOR}" "BUILD_PLATFORMS=${CSI_PROW_BUILD_PLATFORMS}" || die "'make all' failed"
+        # In kubernetes presubmit the needed test packages are already built in kind node image
+        if [[ $(basename "${REPO_DIR}") != "kubernetes" ]]; then
+            run_with_go "${CSI_PROW_GO_VERSION_BUILD}" make all "GOFLAGS_VENDOR=${GOFLAGS_VENDOR}" "BUILD_PLATFORMS=${CSI_PROW_BUILD_PLATFORMS}" || die "'make all' failed"
+        fi
         # We don't want test failures to prevent E2E testing below, because the failure
         # might have been minor or unavoidable, for example when experimenting with
         # changes in "release-tools" in a PR (that fails the "is release-tools unmodified"
@@ -1261,7 +1421,9 @@ main () {
             fi
         fi
         # Required for E2E testing.
-        run_with_go "${CSI_PROW_GO_VERSION_BUILD}" make container "GOFLAGS_VENDOR=${GOFLAGS_VENDOR}" || die "'make container' failed"
+        if [[ $(basename "${REPO_DIR}") != "kubernetes" ]]; then
+            run_with_go "${CSI_PROW_GO_VERSION_BUILD}" make container "GOFLAGS_VENDOR=${GOFLAGS_VENDOR}" || die "'make container' failed"
+        fi
     fi
 
     if tests_need_kind; then
@@ -1314,7 +1476,6 @@ main () {
             # Install necessary snapshot CRDs and snapshot controller
             install_snapshot_crds
             install_snapshot_controller
-
 
             # Installing the driver might be disabled.
             if ${CSI_PROW_DRIVER_INSTALL} "$images"; then
